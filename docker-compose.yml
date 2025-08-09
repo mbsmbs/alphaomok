@@ -1,6 +1,4 @@
 # docker-compose.yml
-version: "3.8"
-
 services:
   backend:
     build: ./backend
@@ -12,12 +10,15 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    platform: linux/amd64
     ports:
       - "3000:3000"
     volumes:
-      - ./frontend:/app
+      - ./frontend:/app:delegated # live code
+      - /app/node_modules # ← container-managed deps (prevents host overwrite)
     working_dir: /app
-    command: npm run dev
     environment:
       - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
