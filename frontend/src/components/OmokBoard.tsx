@@ -7,13 +7,13 @@ type Move = { x: number; y: number; player: Player };
 
 const SIZE = 15;
 const DIRS: Coord[] = [
-  { x: 1, y: 0 },  // →
-  { x: 0, y: 1 },  // ↓
-  { x: 1, y: 1 },  // ↘
-  { x: 1, y: -1 }, // ↗
+  { x: 1, y: 0 },   // →
+  { x: 0, y: 1 },   // ↓
+  { x: 1, y: 1 },   // ↘
+  { x: 1, y: -1 },  // ↗
 ];
 
-// % position for index inside [0..SIZE-1] within the inset-6 region
+// Percentage for index inside [0..SIZE-1] within the inset-6 area
 const posPct = (i: number) => `${(i / (SIZE - 1)) * 100}%`;
 
 function makeEmptyBoard(): Player[][] {
@@ -21,44 +21,77 @@ function makeEmptyBoard(): Player[][] {
 }
 const inBounds = (x: number, y: number) => x >= 0 && x < SIZE && y >= 0 && y < SIZE;
 
-/** Build the full line string through (cx,cy) along (dx,dy),
- * treating the candidate position as 'player' even if board is empty there.
- * Encoding: '1' = player, '2' = opponent, '0' = empty. */
-function lineStringWithCandidate(
+/** Build the full line with the candidate move injected as '1' (current player).
+ * arr values: 0 empty, 1 = current player, 2 = opponent.
+ * Returns the line array + the candidate's index in that array.
+ */
+function buildLineWithCandidate(
   board: Player[][],
   cx: number, cy: number,
   dx: number, dy: number,
   player: Player
-): string {
+): { arr: number[]; cidx: number } {
+  // Move to the earliest in-bounds point on this line
   let x = cx, y = cy;
   while (inBounds(x - dx, y - dy)) { x -= dx; y -= dy; }
 
-  let s = '';
+  const arr: number[] = [];
+  let cidx = -1;
+
   while (inBounds(x, y)) {
-    const v = (x === cx && y === cy) ? player : board[y][x];
-    s += v === 0 ? '0' : (v === player ? '1' : '2');
+    if (x === cx && y === cy) {
+      arr.push(1);            // candidate as current player
+      cidx = arr.length - 1;  // remember its index
+    } else {
+      const v = board[y][x];
+      arr.push(v === 0 ? 0 : (v === player ? 1 : 2));
+    }
     x += dx; y += dy;
   }
-  return s;
+  return { arr, cidx };
 }
 
-/** Count "open three" patterns in a single line string. */
-function countOpenThreesInLine(s: string): number {
-  const re = /01110|010110|011010/g;
-  let cnt = 0, m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) {
-    cnt += 1;
-    re.lastIndex = m.index + 1; // allow overlaps
+/** Count open-three patterns in a single line,
+ * but only if the candidate index is one of the "1" cells in that pattern.
+ * Patterns (zeros at both ends ensure "open"): 01110, 010110, 011010
+ */
+function countOpenThreesInThisLine(arr: number[], cidx: number): number {
+  let count = 0;
+
+  const eq5 = (i: number, a: number, b: number, c: number, d: number, e: number) =>
+    arr[i] === a && arr[i+1] === b && arr[i+2] === c && arr[i+3] === d && arr[i+4] === e;
+  const eq6 = (i: number, a: number, b: number, c: number, d: number, e: number, f: number) =>
+    arr[i] === a && arr[i+1] === b && arr[i+2] === c && arr[i+3] === d && arr[i+4] === e && arr[i+5] === f;
+
+  // Straight open three: 0 1 1 1 0  (candidate must be at one of the 1's)
+  for (let i = 0; i + 5 <= arr.length; i++) {
+    if (eq5(i, 0, 1, 1, 1, 0)) {
+      if (cidx === i + 1 || cidx === i + 2 || cidx === i + 3) count++;
+    }
   }
-  return cnt;
+
+  // Broken threes (6 window):
+  for (let i = 0; i + 6 <= arr.length; i++) {
+    // 0 1 0 1 1 0  (candidate at i+1, i+3, or i+4)
+    if (eq6(i, 0, 1, 0, 1, 1, 0)) {
+      if (cidx === i + 1 || cidx === i + 3 || cidx === i + 4) count++;
+      continue;
+    }
+    // 0 1 1 0 1 0  (candidate at i+1, i+2, or i+4)
+    if (eq6(i, 0, 1, 1, 0, 1, 0)) {
+      if (cidx === i + 1 || cidx === i + 2 || cidx === i + 4) count++;
+    }
+  }
+
+  return count;
 }
 
-/** Total number of open-three patterns created by playing (x,y) as 'player'. */
+/** Sum of open-three patterns created by placing (x,y) as 'player' across 4 directions. */
 function countOpenThrees(board: Player[][], x: number, y: number, player: Player): number {
   let total = 0;
   for (const d of DIRS) {
-    const line = lineStringWithCandidate(board, x, y, d.x, d.y, player);
-    total += countOpenThreesInLine(line);
+    const { arr, cidx } = buildLineWithCandidate(board, x, y, d.x, d.y, player);
+    total += countOpenThreesInThisLine(arr, cidx);
   }
   return total;
 }
@@ -82,7 +115,7 @@ function getWinningLine(board: Player[][], last: Coord, player: Player): Coord[]
   return null;
 }
 
-/** Rebuild board and state from a move list prefix [0..k). */
+/** Rebuild state from a prefix of moves (for undo / jump). */
 function buildPositionFromMoves(moves: Move[]): {
   board: Player[][];
   current: Player;
@@ -109,26 +142,26 @@ function buildPositionFromMoves(moves: Move[]): {
 
 export default function OmokBoard() {
   const [board, setBoard] = useState<Player[][]>(() => makeEmptyBoard());
-  const [current, setCurrent] = useState<Player>(1);  // black starts
+  const [current, setCurrent] = useState<Player>(1);  // Black starts
   const [winner, setWinner] = useState<Player>(0);
   const [lastMove, setLastMove] = useState<Coord | null>(null);
   const [winLine, setWinLine] = useState<Coord[] | null>(null);
   const [illegalAt, setIllegalAt] = useState<Coord | null>(null);
-  const [moves, setMoves] = useState<Move[]>([]);     // 👈 history
+  const [moves, setMoves] = useState<Move[]>([]);
 
   const statusText = useMemo(() => {
     if (winner === 1) return 'Black wins!';
     if (winner === 2) return 'White wins!';
-    if (illegalAt) return 'Illegal: 3×3 (double-three) for Black';
+    if (illegalAt) return 'Illegal: 3×3 (double-three)';
     return current === 1 ? "Black's turn" : "White's turn";
   }, [current, winner, illegalAt]);
 
   const place = (x: number, y: number) => {
     if (winner || board[y][x] !== 0) return;
 
-    // 3×3 rule: only restrict Black
-    if (current === 1) {
-      const threes = countOpenThrees(board, x, y, 1);
+    // 3×3 rule: forbid for BOTH players
+    {
+      const threes = countOpenThrees(board, x, y, current);
       if (threes >= 2) {
         setIllegalAt({ x, y });
         setTimeout(() => setIllegalAt(null), 900);
@@ -136,22 +169,24 @@ export default function OmokBoard() {
       }
     }
 
+    // Apply move
     const next = board.map(r => r.slice());
     next[y][x] = current;
 
     const move: Move = { x, y, player: current };
     const newMoves = [...moves, move];
-    setMoves(newMoves); // 👈 push into history
+    setMoves(newMoves);
     setBoard(next);
     setLastMove({ x, y });
 
+    // Win detection
     const line = getWinningLine(next, { x, y }, current);
     if (line) { setWinner(current); setWinLine(line); return; }
 
+    // Next turn
     setCurrent(current === 1 ? 2 : 1);
   };
 
-  /** Undo last move */
   const undo = () => {
     if (moves.length === 0) return;
     const newMoves = moves.slice(0, -1);
@@ -165,7 +200,6 @@ export default function OmokBoard() {
     setIllegalAt(null);
   };
 
-  /** Jump to any move index (time travel) */
   const jumpTo = (idx: number) => {
     const newMoves = moves.slice(0, idx);
     const rebuilt = buildPositionFromMoves(newMoves);
@@ -196,11 +230,17 @@ export default function OmokBoard() {
       {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-lg font-medium">{statusText}</span>
-        <button onClick={undo} className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition disabled:opacity-50"
-          disabled={moves.length === 0}>
+        <button
+          onClick={undo}
+          className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition disabled:opacity-50"
+          disabled={moves.length === 0}
+        >
           Undo
         </button>
-        <button onClick={reset} className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition">
+        <button
+          onClick={reset}
+          className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition"
+        >
           Reset
         </button>
       </div>
@@ -219,7 +259,7 @@ export default function OmokBoard() {
           {/* Inner wooden area (grid region) */}
           <div className="absolute inset-6 rounded-xl bg-[#f6e1b5] shadow-inner" />
 
-          {/* Grid lines */}
+          {/* Grid lines exactly inside the grid region */}
           <div
             className="absolute inset-6 rounded-xl pointer-events-none"
             style={{
@@ -232,7 +272,7 @@ export default function OmokBoard() {
             aria-hidden
           />
 
-          {/* Positioning layer for hoshi + stones */}
+          {/* Positioning layer for hoshi + stones (same inset as lines) */}
           <div className="absolute inset-6">
             {/* Hoshi at 3/7/11 (0-index) */}
             {[3, 7, 11].flatMap(ix =>
@@ -281,7 +321,7 @@ export default function OmokBoard() {
                           height: '30px',
                           left: '50%',
                           top: '50%',
-                          background: 'rgba(239, 68, 68, 0.5)', // red-500/50
+                          background: 'rgba(239, 68, 68, 0.5)',
                         }}
                         aria-hidden
                       />
@@ -327,7 +367,7 @@ export default function OmokBoard() {
           </div>
         </div>
 
-        {/* Move history panel */}
+        {/* Move history */}
         <div className="w-full max-w-xs rounded-xl border bg-white/70 backdrop-blur p-3 shadow-sm">
           <div className="flex items-center justify-between mb-2">
             <h3 className="font-semibold">Moves ({moves.length})</h3>
@@ -373,7 +413,7 @@ export default function OmokBoard() {
       </div>
 
       <div className="text-sm text-neutral-600">
-        3×3 rule active • Click a history item to jump • “Undo” reverts one move
+        3×3 rule (both colors) • Undo & jump supported
       </div>
     </div>
   );
