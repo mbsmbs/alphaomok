@@ -7,7 +7,7 @@ class PVNet(nn.Module):
     def __init__(self, size=15, channels=64, blocks=12):
         super().__init__()
         C=channels
-        self.in = nn.Conv2d(3, C, 3, padding=1)  # planes: current stones, opp stones, ones
+        self.conv_in = nn.Conv2d(3, C, 3, padding=1)  # planes: current stones, opp stones, ones
         self.res = nn.Sequential(*[Residual(C) for _ in range(blocks)])
         self.policy = nn.Sequential(nn.Conv2d(C, 2, 1), nn.ReLU(),
                                     nn.Flatten(), nn.Linear(2*size*size, size*size))
@@ -15,7 +15,7 @@ class PVNet(nn.Module):
                                     nn.Flatten(), nn.Linear(size*size, 256),
                                     nn.ReLU(), nn.Linear(256,1), nn.Tanh())
     def forward(self, x):
-        h = torch.relu(self.in(x))
+        h = torch.relu(self.conv_in(x))
         h = self.res(h)
         p = self.policy(h)
         v = self.value(h)
