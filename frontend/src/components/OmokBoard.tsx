@@ -3,9 +3,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 type Player = 0 | 1 | 2; // 0 empty, 1 black, 2 white
 type Coord = { x: number; y: number };
-type Move = { x: number; y: number; player: Player };
+type Move  = { x: number; y: number; player: Player };
 
-type Level = 'beginner' | 'intermediate' | 'hard' | 'insane';
+type Level  = 'beginner' | 'intermediate' | 'hard' | 'insane';
 type AIColor = 'black' | 'white' | 'auto';
 
 export default function OmokBoard(props: {
@@ -24,7 +24,10 @@ export default function OmokBoard(props: {
   ];
   const posPct = (i: number) => `${(i / (SIZE - 1)) * 100}%`;
   const inBounds = (x: number, y: number) => x >= 0 && x < SIZE && y >= 0 && y < SIZE;
-  const makeEmptyBoard = () => Array.from({ length: SIZE }, () => Array<Player>(SIZE).fill(0));
+  const makeEmptyBoard = () =>
+    Array.from({ length: SIZE }, () => Array<Player>(SIZE).fill(0));
+  const other = (p: Player) => (p === 1 ? 2 : 1);
+  const cloneBoard = (b: Player[][]) => b.map(r => r.slice());
 
   /* ---------- state ---------- */
   const [board, setBoard] = useState<Player[][]>(() => makeEmptyBoard());
@@ -35,7 +38,7 @@ export default function OmokBoard(props: {
   const [illegalAt, setIllegalAt] = useState<Coord | null>(null);
   const [moves, setMoves] = useState<Move[]>([]);
 
-  // NEW: match win counters (persist across Reset)
+  // Match win counters (persist across Reset)
   const [blackWins, setBlackWins] = useState(0);
   const [whiteWins, setWhiteWins] = useState(0);
 
@@ -46,7 +49,9 @@ export default function OmokBoard(props: {
     return 2; // 'auto' -> AI plays White by default
   }, [aiEnabled, aiColor]);
 
-  /* ---------- 3×3 detection ---------- */
+  /* ---------- 3×3 detection (fixed & robust) ---------- */
+  // Build a 1D line for a given direction, with the candidate cell marked as 1,
+  // empties as 0, and opponent stones as 2. Returns the array and the index of the candidate.
   function buildLineWithCandidate(cx: number, cy: number, dx: number, dy: number, player: Player) {
     let x = cx, y = cy;
     while (inBounds(x - dx, y - dy)) { x -= dx; y -= dy; }
@@ -62,27 +67,47 @@ export default function OmokBoard(props: {
     }
     return { arr, cidx };
   }
-  function countOpenThreesInThisLine(arr: number[], cidx: number) {
-    let count = 0;
-    const eq5 = (i: number, a: number, b: number, c: number, d: number, e: number) =>
-      arr[i] === a && arr[i+1] === b && arr[i+2] === c && arr[i+3] === d && arr[i+4] === e;
-    const eq6 = (i: number, a: number, b: number, c: number, d: number, e: number, f: number) =>
-      arr[i] === a && arr[i+1] === b && arr[i+2] === c && arr[i+3] === d && arr[i+4] === e && arr[i+5] === f;
 
-    for (let i = 0; i + 5 <= arr.length; i++) {
-      if (eq5(i, 0, 1, 1, 1, 0)) {
-        if (cidx === i + 1 || cidx === i + 2 || cidx === i + 3) count++;
+  // Same but on an arbitrary board (used for simulation/lookahead).
+  function buildLineWithCandidateOn(b: Player[][], cx: number, cy: number, dx: number, dy: number, player: Player) {
+    let x = cx, y = cy;
+    while (inBounds(x - dx, y - dy)) { x -= dx; y -= dy; }
+    const arr: number[] = [];
+    let cidx = -1;
+    while (inBounds(x, y)) {
+      if (x === cx && y === cy) { arr.push(1); cidx = arr.length - 1; }
+      else {
+        const v = b[y][x];
+        arr.push(v === 0 ? 0 : (v === player ? 1 : 2));
       }
+      x += dx; y += dy;
     }
-    for (let i = 0; i + 6 <= arr.length; i++) {
-      if (eq6(i, 0, 1, 0, 1, 1, 0)) {
-        if (cidx === i + 1 || cidx === i + 3 || cidx === i + 4) count++;
-      } else if (eq6(i, 0, 1, 1, 0, 1, 0)) {
-        if (cidx === i + 1 || cidx === i + 2 || cidx === i + 4) count++;
-      }
+    return { arr, cidx };
+  }
+
+  // NEW: sliding-window per-line detector. Counts open-threes in this line
+  // that *include the candidate index*. We match three canonical shapes:
+  //   01110  (length 5)
+  //   010110 (length 6)
+  //   011010 (length 6)
+  function countOpenThreesInThisLine(arr: number[], cidx: number): number {
+    let count = 0;
+    // length-5 windows
+    for (let i = 0; i <= arr.length - 5; i++) {
+      if (cidx < i || cidx >= i + 5) continue;
+      const win = arr.slice(i, i + 5).join('');
+      if (win === '01110') count++;
+    }
+    // length-6 windows
+    for (let i = 0; i <= arr.length - 6; i++) {
+      if (cidx < i || cidx >= i + 6) continue;
+      const win = arr.slice(i, i + 6).join('');
+      if (win === '010110' || win === '011010') count++;
     }
     return count;
   }
+
+  // Sum across all four directions — if total ≥ 2 → double-three (illegal).
   function countOpenThrees(x: number, y: number, player: Player): number {
     let total = 0;
     for (const d of DIRS) {
@@ -91,25 +116,35 @@ export default function OmokBoard(props: {
     }
     return total;
   }
+  function countOpenThreesOn(b: Player[][], x: number, y: number, player: Player): number {
+    let total = 0;
+    for (const d of DIRS) {
+      const { arr, cidx } = buildLineWithCandidateOn(b, x, y, d.x, d.y, player);
+      total += countOpenThreesInThisLine(arr, cidx);
+    }
+    return total;
+  }
 
   /* ---------- win detection ---------- */
-  function getWinningLine(last: Coord, player: Player): Coord[] | null {
+  function getWinningLine(last: Coord, player: Player, b: Player[][] = board): Coord[] | null {
     for (const d of DIRS) {
       const line: Coord[] = [{ ...last }];
       let x = last.x + d.x, y = last.y + d.y;
-      while (inBounds(x, y) && board[y][x] === player) { line.push({ x, y }); x += d.x; y += d.y; }
+      while (inBounds(x, y) && b[y][x] === player) { line.push({ x, y }); x += d.x; y += d.y; }
       x = last.x - d.x; y = last.y - d.y;
-      while (inBounds(x, y) && board[y][x] === player) { line.unshift({ x, y }); x -= d.x; y -= d.y; }
+      while (inBounds(x, y) && b[y][x] === player) { line.unshift({ x, y }); x -= d.x; y -= d.y; }
       if (line.length >= 5) return line.slice(0, 5);
     }
     return null;
   }
+  const hasFive = (b: Player[][], x: number, y: number, p: Player) =>
+    !!getWinningLine({ x, y }, p, b);
 
-  /* ---------- status text ---------- */
+  /* ---------- status ---------- */
   const statusText = useMemo(() => {
     if (winner === 1) return 'Black wins!';
     if (winner === 2) return 'White wins!';
-    if (illegalAt) return 'Illegal: 3×3 (double-three)';
+    if (illegalAt)  return 'Illegal: 3×3 (double-three)';
     return current === 1 ? "Black's turn" : "White's turn";
   }, [current, winner, illegalAt]);
 
@@ -129,7 +164,7 @@ export default function OmokBoard(props: {
     setBoard(next);
     setLastMove({ x, y });
 
-    const line = getWinningLine({ x, y }, current);
+    const line = getWinningLine({ x, y }, current, next);
     if (line) {
       setWinner(current);
       setWinLine(line);
@@ -141,44 +176,116 @@ export default function OmokBoard(props: {
     setCurrent(current === 1 ? 2 : 1);
   };
 
-  /* ---------- very simple built-in AI ---------- */
-  function pickAIMove(level: Level, player: Player): Coord | null {
-    const cx = (SIZE - 1) / 2, cy = cx;
-    const empties: Coord[] = [];
-    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
-      if (board[y][x] === 0) empties.push({ x, y });
-    }
-    const adj = (x: number, y: number) => {
-      let s = 0; for (const d of DIRS) {
-        const nx = x + d.x, ny = y + d.y;
-        if (inBounds(nx, ny) && board[ny][nx] === player) s += 1;
-      } return s;
+  /* ---------- AI evaluation helpers ---------- */
+  const scorePlacement = (b: Player[][], x: number, y: number, p: Player): number => {
+    const inB = (xx: number, yy: number) => xx >= 0 && xx < SIZE && yy >= 0 && yy < SIZE;
+    const countDir = (dx: number, dy: number) => {
+      let c = 1;
+      let openL = false, openR = false;
+
+      // forward
+      let xx = x + dx, yy = y + dy;
+      while (inB(xx, yy) && b[yy][xx] === p) { c++; xx += dx; yy += dy; }
+      if (inB(xx, yy) && b[yy][xx] === 0) openR = true;
+
+      // backward
+      xx = x - dx; yy = y - dy;
+      while (inB(xx, yy) && b[yy][xx] === p) { c++; xx -= dx; yy -= dy; }
+      if (inB(xx, yy) && b[yy][xx] === 0) openL = true;
+
+      return { len: c, openEnds: (openL ? 1 : 0) + (openR ? 1 : 0) };
     };
-    const scored = empties.map(c => {
-      const dist = (c.x - cx) * (c.x - cx) + (c.y - cy) * (c.y - cy);
-      return { c, score: -dist + 0.5 * adj(c.x, c.y) };
-    });
 
-    const noise =
-      level === 'beginner' ? 0.35 :
-      level === 'intermediate' ? 0.15 :
-      level === 'hard' ? 0.05 : 0.0;
-    const K = level === 'beginner' ? 30 : level === 'intermediate' ? 15 : level === 'hard' ? 6 : 3;
-
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored.slice(0, Math.min(K, scored.length));
-
-    if (noise > 0) {
-      for (let i = top.length - 1; i > 0; i--) {
-        if (Math.random() < noise) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [top[i], top[j]] = [top[j], top[i]];
-        }
-      }
+    let score = 0;
+    for (const d of DIRS) {
+      const { len, openEnds } = countDir(d.x, d.y);
+      if (len >= 5) score += 1e6;                    // immediate win
+      else if (len === 4 && openEnds >= 1) score += 8000;
+      else if (len === 3 && openEnds === 2) score += 1500;
+      else if (len === 3 && openEnds === 1) score += 500;
+      else if (len === 2 && openEnds === 2) score += 200;
+      else score += 5 * len;
     }
-    for (const t of top) if (countOpenThrees(t.c.x, t.c.y, player) < 2) return t.c;
-    for (const t of scored) if (countOpenThrees(t.c.x, t.c.y, player) < 2) return t.c;
-    return null;
+
+    const cx = (SIZE - 1) / 2, cy = cx;
+    const dist = (x - cx) ** 2 + (y - cy) ** 2;
+    return score - 0.3 * dist;                        // mild center bias
+  };
+
+  const isImmediateWin = (b: Player[][], x: number, y: number, p: Player) => {
+    const bb = cloneBoard(b);
+    bb[y][x] = p;
+    return hasFive(bb, x, y, p);
+  };
+
+  /* ---------- AI move picker (levels differ clearly) ---------- */
+  function pickAIMove(level: Level, p: Player): Coord | null {
+    // 1) legal empties (respect 3×3 on current board)
+    const legal: Coord[] = [];
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+      if (board[y][x] !== 0) continue;
+      if (countOpenThrees(x, y, p) >= 2) continue; // illegal double-three
+      legal.push({ x, y });
+    }
+    if (legal.length === 0) return null;
+
+    const opp = other(p);
+
+    // 2) immediate win
+    for (const c of legal) if (isImmediateWin(board, c.x, c.y, p)) return c;
+
+    // 3) must-block (opponent immediate win)
+    for (const c of legal) if (isImmediateWin(board, c.x, c.y, opp)) return c;
+
+    // 4) score each legal move for p, plus small defensive bonus
+    const scored = legal.map(c => {
+      const sSelf = scorePlacement(board, c.x, c.y, p);
+      const sOpp  = scorePlacement(board, c.x, c.y, opp);
+      return { c, score: sSelf + 0.35 * sOpp };
+    }).sort((a, b) => b.score - a.score);
+
+    // 5) level settings: breadth + noise + 1-ply lookahead for high levels
+    const cfg = {
+      beginner:     { K: 24, noise: 0.45, lookahead: 0 },
+      intermediate: { K: 12, noise: 0.20, lookahead: 0 },
+      hard:         { K:  6, noise: 0.05, lookahead: 1 },
+      insane:       { K:  3, noise: 0.00, lookahead: 1 },
+    }[level];
+
+    const top = scored.slice(0, Math.min(cfg.K, scored.length));
+
+    // optional 1-ply lookahead for hard/insane
+    if (cfg.lookahead > 0) {
+      let best = top[0]; let bestEval = -Infinity;
+
+      for (const t of top) {
+        // simulate our move
+        const b1 = cloneBoard(board);
+        b1[t.c.y][t.c.x] = p;
+        if (hasFive(b1, t.c.x, t.c.y, p)) return t.c;  // direct win
+
+        // opponent best reply (greedy), respecting 3×3 on b1
+        let worstReply = 0;
+        for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+          if (b1[y][x] !== 0) continue;
+          if (countOpenThreesOn(b1, x, y, opp) >= 2) continue;
+          if (hasFive(cloneBoard(b1), x, y, opp)) { worstReply = 1e5; y = SIZE; break; }
+          const replyScore = scorePlacement(b1, x, y, opp);
+          if (replyScore > worstReply) worstReply = replyScore;
+        }
+        const evalScore = t.score - 0.5 * worstReply;     // penalize moves allowing big replies
+        if (evalScore > bestEval) { bestEval = evalScore; best = t; }
+      }
+      return best.c;
+    }
+
+    // add randomness by level (among top-K)
+    if (cfg.noise > 0 && top.length > 1) {
+      // exponential-ish pick; higher noise -> more likely to pick deeper in top-K
+      const j = Math.min(top.length - 1, Math.floor(-Math.log(1 - Math.random()) * cfg.noise * top.length));
+      return top[j].c;
+    }
+    return top[0].c;
   }
 
   // AI plays automatically when it's AI's turn
@@ -204,8 +311,7 @@ export default function OmokBoard(props: {
       b[mv.y][mv.x] = mv.player;
       last = { x: mv.x, y: mv.y };
       if (!win) {
-        // temp board for win check
-        const temp = getWinningLine(last, mv.player);
+        const temp = getWinningLine(last, mv.player, b);
         if (temp) { win = mv.player; wline = temp; }
       }
     }
@@ -227,7 +333,7 @@ export default function OmokBoard(props: {
   };
 
   const jumpTo = (idx: number) => {
-    if (winner) return; // disable after game ends to keep counters consistent
+    if (winner) return; // keep counters consistent
     const newMoves = moves.slice(0, idx);
     const rebuilt = buildPositionFromMoves(newMoves);
     setMoves(newMoves);
@@ -245,26 +351,31 @@ export default function OmokBoard(props: {
     setWinner(0); setLastMove(null); setWinLine(null); setIllegalAt(null);
   };
 
-  const isOnWinLine = (x: number, y: number) => !!winLine?.some(c => c.x === x && c.y === y);
+  const isOnWinLine = (x: number, y: number) =>
+    !!winLine?.some(c => c.x === x && c.y === y);
 
-  /* ---------------- UI (centered + sidebar) ---------------- */
+  /* ---------------- UI (scorebar inline with buttons) ---------------- */
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-      {/* Match scoreboard (wins) */}
+      {/* Score bar: scores (left) • status (center) • buttons (right) */}
       <div className="flex justify-center mb-3">
-        <div className="flex items-center gap-4 rounded-xl border bg-white/70 backdrop-blur px-4 py-2 shadow-sm">
-          <div className="flex items-center gap-2">
-            <span className="inline-block w-4 h-4 rounded-full bg-neutral-900 shadow" />
-            <span className="font-medium">Black wins:</span>
-            <span className="tabular-nums">{blackWins}</span>
+        <div className="flex items-center justify-between gap-4 w-full max-w-2xl rounded-xl border bg-white/70 backdrop-blur px-4 py-2 shadow-sm">
+          {/* Left: scores */}
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-4 rounded-full bg-neutral-900 shadow" />
+              <span className="font-medium">Black wins:</span>
+              <span className="tabular-nums">{blackWins}</span>
+            </div>
+            <div className="w-px h-5 bg-gray-300/80" />
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-4 rounded-full bg-neutral-100 ring-1 ring-neutral-500/40 shadow" />
+              <span className="font-medium">White wins:</span>
+              <span className="tabular-nums">{whiteWins}</span>
+            </div>
           </div>
-          <div className="w-px h-5 bg-gray-300/80" />
-          <div className="flex items-center gap-2">
-            <span className="inline-block w-4 h-4 rounded-full bg-neutral-100 ring-1 ring-neutral-500/40 shadow" />
-            <span className="font-medium">White wins:</span>
-            <span className="tabular-nums">{whiteWins}</span>
-          </div>
-          <div className="w-px h-5 bg-gray-300/80" />
+
+          {/* Center: status */}
           <div
             className={[
               'px-3 py-1 rounded-lg text-sm font-medium',
@@ -275,28 +386,28 @@ export default function OmokBoard(props: {
                   : 'bg-neutral-100 text-gray-800 ring-1 ring-neutral-500/40',
             ].join(' ')}
           >
-            {statusText}
+            {winner ? (winner === 1 ? 'Black wins!' : 'White wins!') : (current === 1 ? "Black's turn" : "White's turn")}
+          </div>
+
+          {/* Right: buttons */}
+          <div className="flex gap-2">
+            <button
+              onClick={undo}
+              className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition disabled:opacity-50"
+              disabled={moves.length === 0 || !!winner}
+              title={winner ? 'Undo disabled after game over' : 'Undo last move'}
+            >
+              Undo
+            </button>
+            <button
+              onClick={reset}
+              className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition"
+              title="Start a new game (wins stay)"
+            >
+              Reset
+            </button>
           </div>
         </div>
-      </div>
-
-      {/* Controls */}
-      <div className="flex justify-center gap-2 mb-4">
-        <button
-          onClick={undo}
-          className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition disabled:opacity-50"
-          disabled={moves.length === 0 || !!winner}
-          title={winner ? 'Undo disabled after game over' : 'Undo last move'}
-        >
-          Undo
-        </button>
-        <button
-          onClick={reset}
-          className="rounded-lg px-3 py-1.5 border shadow-sm hover:shadow transition"
-          title="Start a new game (wins stay)"
-        >
-          Reset
-        </button>
       </div>
 
       {/* Main area: board center, sidebar on desktop */}
