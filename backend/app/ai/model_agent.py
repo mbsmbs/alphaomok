@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Tuple, Dict, Any, List
 import torch, numpy as np
-from ..rules import is_double_three_illegal
+from ..rules import is_double_three_illegal, is_overline_illegal
 
 SIZE = 15
 MODEL_PATH = "data/model.pth"
@@ -43,7 +43,7 @@ class ModelAgent:
         with torch.no_grad():
             logits = self.model(x)[0]  # (225,)
 
-        # mask illegal (occupied + 3x3)
+        # Mask illegal (occupied, 3×3, overline)
         mask = torch.full_like(logits, float("-inf"))
         for y in range(self.size):
             for x_ in range(self.size):
@@ -51,13 +51,17 @@ class ModelAgent:
                     continue
                 if ensure_legal and is_double_three_illegal(board, x_, y, player):
                     continue
+                if ensure_legal and is_overline_illegal(board, x_, y, player):
+                    continue
                 mask[y * self.size + x_] = logits[y * self.size + x_]
 
         if torch.isneginf(mask).all():
-            # fallback: first empty
+            # fallback: first available legal
             for y in range(self.size):
                 for x_ in range(self.size):
-                    if board[y][x_] == 0:
+                    if board[y][x_] == 0 and \
+                       not is_double_three_illegal(board, x_, y, player) and \
+                       not is_overline_illegal(board, x_, y, player):
                         return x_, y, {"policy": "fallback"}
             raise RuntimeError("no legal moves")
 
