@@ -8,6 +8,8 @@ services:
       - ./backend:/app
       - ./backend/data:/app/data # persist games & model
     working_dir: /app
+    environment:
+      - AUTO_TRAIN=1 # set 0 to disable auto fine-tune
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
